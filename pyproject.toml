@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "modelbenchx"
+version = "0.1.0"
+description = "Universal, extensible benchmarking framework for on-device inference runtimes (ONNX Runtime, Core ML, Core AI)."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "BSD-3-Clause" }
+authors = [{ name = "ModelBenchX" }]
+keywords = ["benchmark", "inference", "coreml", "coreai", "onnxruntime", "ane", "apple-silicon"]
+
+# The orchestrator and reporting layers depend only on numpy + stdlib so they
+# never co-import the conflicting runtimes. Each runtime is an optional extra,
+# imported only inside its own subprocess worker.
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+onnx = ["onnx>=1.15", "onnxruntime>=1.17"]
+coreml = ["coremltools>=8.0"]
+coreai = ["coreai"]
+tflite = ["ai-edge-litert"]  # alternates: tflite-runtime or tensorflow (see contributor guide)
+dev = ["pytest>=7", "ruff>=0.6"]
+
+[project.scripts]
+modelbenchx = "modelbenchx.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/devin-lai/modelbenchx"
+Repository = "https://github.com/devin-lai/modelbenchx"
+Issues = "https://github.com/devin-lai/modelbenchx/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# E/W pycodestyle, F pyflakes, I isort, UP pyupgrade, B bugbear, SIM simplify.
+# C4 is intentionally omitted: the codebase prefers dict(...) keyword construction.
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
