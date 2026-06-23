@@ -8,6 +8,9 @@ re-keys them on the far side.
 
 from __future__ import annotations
 
+import contextlib
+import os
+import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -29,9 +32,31 @@ def narrow_array(a: np.ndarray) -> np.ndarray:
     return a.astype(target) if target is not None else a
 
 
+def _atomic_savez(path: str | Path, arrays: Sequence[np.ndarray]) -> None:
+    """Write a positional ``.npz`` atomically (temp file + ``os.replace``).
+
+    These files land in the persistent cache and are read back on resume, so a
+    worker killed mid-write (timeout SIGKILL, native ``abort()``) must never
+    leave a truncated archive that a later run reads as valid. Writing to a
+    sibling temp file and renaming makes the final path appear all-or-nothing.
+    ``np.savez`` writes the zip straight to the file object, so (unlike the
+    string-path form) it does not append a second ``.npz`` suffix."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp.npz")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            np.savez(f, *arrays)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
 def save_named(path: str | Path, names: Sequence[str], by_name: dict[str, np.ndarray]) -> None:
     """Save arrays positionally in the order given by ``names``."""
-    np.savez(str(path), *(np.asarray(by_name[n]) for n in names))
+    _atomic_savez(path, [np.asarray(by_name[n]) for n in names])
 
 
 def load_named(path: str | Path, names: Sequence[str]) -> dict[str, np.ndarray]:
@@ -42,8 +67,25 @@ def load_named(path: str | Path, names: Sequence[str]) -> dict[str, np.ndarray]:
 
 def save_samples(path: str | Path, names: Sequence[str], samples: Sequence[dict[str, np.ndarray]]) -> None:
     """Save K input samples positionally: sample ``s`` occupies ``arr_{s*len+i}``."""
-    arrays = [np.asarray(sample[n]) for sample in samples for n in names]
-    np.savez(str(path), *arrays)
+    _atomic_savez(path, [np.asarray(sample[n]) for sample in samples for n in names])
+
+
+def write_text_atomic(path: str | Path, text: str) -> None:
+    """Write a small text file (feed/baseline metadata, fingerprints) atomically,
+    for the same reason as :func:`_atomic_savez`: a partial JSON left in the cache
+    by an interrupted writer must not later be read as complete. Uses a unique
+    temp file and cleans it up on error so a kill leaves no stray ``.tmp``."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
 
 
 def load_samples(path: str | Path, names: Sequence[str], n_samples: int) -> list[dict[str, np.ndarray]]:

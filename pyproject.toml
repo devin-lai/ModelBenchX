@@ -9,7 +9,7 @@ description = "Universal, extensible benchmarking framework for on-device infere
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "BSD-3-Clause" }
-authors = [{ name = "ModelBenchX" }]
+authors = [{ name = "Devin Lai", email = "markauto75@gmail.com" }]
 keywords = ["benchmark", "inference", "coreml", "coreai", "onnxruntime", "ane", "apple-silicon"]
 
 # The orchestrator and reporting layers depend only on numpy + stdlib so they
@@ -20,7 +20,7 @@ dependencies = ["numpy>=1.24"]
 [project.optional-dependencies]
 onnx = ["onnx>=1.15", "onnxruntime>=1.17"]
 coreml = ["coremltools>=8.0"]
-coreai = ["coreai"]
+coreai = ["coreai"]  # private Apple runtime; not on PyPI — provided by the system/SDK
 tflite = ["ai-edge-litert"]  # alternates: tflite-runtime or tensorflow (see contributor guide)
 dev = ["pytest>=7", "ruff>=0.6"]
 

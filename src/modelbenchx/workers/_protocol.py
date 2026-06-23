@@ -69,18 +69,31 @@ def crash_message(returncode: int, stderr: str) -> str:
     return f"{cause}{detail}"
 
 
+def _load_json(path: Path) -> dict | None:
+    """Read a protocol JSON file, returning None if it is missing or truncated.
+
+    write_result/write_error are non-atomic, so a worker killed by a signal or a
+    full disk mid-write can leave a partial file. A corrupt protocol file must be
+    treated as a crash (one contained failed run), never raised — otherwise it
+    would abort the whole sweep and defeat the subprocess-isolation design."""
+    try:
+        return json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
 def interpret(returncode: int, stderr: str, jobdir: str | Path) -> WorkerOutcome:
     """Map a finished worker process to a structured outcome (pure)."""
     jobdir = Path(jobdir)
     if returncode == 0 and (jobdir / RESULT).exists():
-        return WorkerOutcome(
-            ok=True, crashed=False, returncode=returncode,
-            result=json.loads((jobdir / RESULT).read_text()),
-        )
+        result = _load_json(jobdir / RESULT)
+        if result is not None:
+            return WorkerOutcome(ok=True, crashed=False, returncode=returncode, result=result)
     if (jobdir / ERROR).exists():
-        info = json.loads((jobdir / ERROR).read_text())
-        msg = f"{info.get('type', 'Error')}: {info.get('message', '')}".strip()
-        return WorkerOutcome(ok=False, crashed=False, returncode=returncode, error=msg)
+        info = _load_json(jobdir / ERROR)
+        if info is not None:
+            msg = f"{info.get('type', 'Error')}: {info.get('message', '')}".strip()
+            return WorkerOutcome(ok=False, crashed=False, returncode=returncode, error=msg)
     return WorkerOutcome(
         ok=False, crashed=True, returncode=returncode,
         error=crash_message(returncode, stderr),
@@ -109,9 +122,13 @@ def execute(
 ) -> WorkerOutcome:
     """Run a worker subprocess to completion and interpret the result."""
     try:
+        # The protocol is file-based; only stderr is consumed (for crash_message),
+        # so worker stdout is discarded rather than buffered unbounded into the
+        # parent. stderr stays piped so a native abort's last line is still shown.
         proc = subprocess.run(
             worker_command(python_executable, worker_module, jobdir, qos),
-            capture_output=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             text=True,
             check=False,
             timeout=timeout_s,

@@ -97,6 +97,22 @@ def test_tflite_input_spec_resolves_dynamic_dims():
     assert specs[0].shape == (1, 3, 1, 5)
 
 
+def test_tflite_build_feed_rejects_underfilled_feed():
+    """If the shared feed has fewer arrays than the model has inputs, build_feed
+    must fail loud (recorded as a failed run) rather than silently leave inputs at
+    their zero default and report meaningless numbers as success."""
+    from modelbenchx.workers.tflite_worker import TFLiteWorker
+
+    w = TFLiteWorker()
+    # Model expects two inputs; the shared feed only carries one.
+    w._in = [
+        {"name": "a", "index": 0, "shape": np.array([1, 3]), "dtype": np.float32},
+        {"name": "b", "index": 1, "shape": np.array([1, 3]), "dtype": np.float32},
+    ]
+    with pytest.raises(ValueError, match="needs 2 input"):
+        w.build_feed({"a": np.zeros((1, 3), np.float32)}, {})
+
+
 # ---------------------------------------------------------------------------
 # End-to-end test: gated on a tflite runtime being available
 # ---------------------------------------------------------------------------

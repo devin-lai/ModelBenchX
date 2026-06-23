@@ -54,6 +54,16 @@ def test_save_load_samples_roundtrip(tmp_path):
     assert np.array_equal(back[1]["y"], np.full(2, 9))
 
 
+def test_write_text_atomic_roundtrip_and_overwrite(tmp_path):
+    p = tmp_path / "sub" / "meta.json"  # parent dir does not exist yet
+    npio.write_text_atomic(p, '{"a": 1}')
+    assert p.read_text() == '{"a": 1}'
+    npio.write_text_atomic(p, '{"a": 2}')  # overwrite in place
+    assert p.read_text() == '{"a": 2}'
+    # No stray temp files left in the directory.
+    assert [f.name for f in p.parent.iterdir()] == ["meta.json"]
+
+
 def test_narrow_array_narrows_only_wide_dtypes():
     assert npio.narrow_array(np.array([1], dtype=np.int64)).dtype == np.int32
     assert npio.narrow_array(np.array([1], dtype=np.uint64)).dtype == np.uint32

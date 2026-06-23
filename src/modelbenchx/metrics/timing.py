@@ -10,8 +10,13 @@ from ..results import TimingStats
 
 
 def cv_pct(t: TimingStats | None) -> float | None:
-    """Coefficient of variation (%): steady-state jitter/stability. Lower is steadier."""
-    if t is None or not t.mean_ms:
+    """Coefficient of variation (%): steady-state jitter/stability. Lower is steadier.
+
+    Undefined for a single sample: ``std`` is then 0.0 by convention, which would
+    read as a perfectly-stable 0% rather than "unknown — one sample" and pull the
+    aggregate median CV toward 0. Such runs return ``None`` (excluded from
+    aggregates) instead."""
+    if t is None or t.iters < 2 or not t.mean_ms:
         return None
     return 100.0 * t.std_ms / t.mean_ms
 

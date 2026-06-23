@@ -164,7 +164,11 @@ class RunResult:
                 fields["raw_ms"] = [_revive(v) for v in fields["raw_ms"]]
             obj.timing = TimingStats(**fields)
         if accuracy is not None:
-            per = [OutputAccuracy(**_revive_numeric(o, _OUTPUT_FLOATS))
+            # Filter unknown keys (mirrors RunResult/TimingStats above) so a
+            # per-output object written by a newer schema does not crash load with
+            # an unexpected-kwarg TypeError; resume/report must degrade gracefully.
+            per = [OutputAccuracy(**{k: v for k, v in _revive_numeric(o, _OUTPUT_FLOATS).items()
+                                     if k in _OUTPUT_ACC_FIELDS})
                    for o in accuracy.get("per_output", [])]
             obj.accuracy = AccuracyStats(
                 per_output=per,
@@ -190,6 +194,7 @@ class RunResult:
 
 _RUN_FIELDS = set(RunResult.__dataclass_fields__)  # type: ignore[attr-defined]
 _TIMING_FIELDS = set(TimingStats.__dataclass_fields__)  # type: ignore[attr-defined]
+_OUTPUT_ACC_FIELDS = set(OutputAccuracy.__dataclass_fields__)  # type: ignore[attr-defined]
 # Numeric fields that may hold a non-finite token on load (revived to float).
 # Excludes string/int/bool/list fields, so a tensor named "NaN" is never coerced.
 _TIMING_FLOATS = {

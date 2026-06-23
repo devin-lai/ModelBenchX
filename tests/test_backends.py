@@ -1,4 +1,16 @@
+import pytest
+
 from modelbenchx.backends import base
+
+
+def test_select_backends_unknown_name_raises_with_choices():
+    """A typo'd --backends value must raise a clean, actionable ValueError listing
+    the choices, not a bare KeyError traceback out of Orchestrator.__init__."""
+    with pytest.raises(ValueError) as exc:
+        base.select_backends(("coreml", "bogus"), system="Darwin")
+    msg = str(exc.value)
+    assert "coreml" in msg and "bogus" in msg
+    assert "onnxruntime" in msg  # lists valid choices
 
 
 def test_every_backend_has_a_format_spec():

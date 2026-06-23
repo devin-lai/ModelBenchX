@@ -24,6 +24,18 @@ def test_union_discovery_partial_presence(tmp_path):
     assert set(reg.get("squeeze__squeeze").sources) == {"mlmodel"}
 
 
+def test_standalone_file_without_key_separator(tmp_path):
+    # A lone foo.tflite (name carries no "model__component" split) is a valid
+    # latency-only target; discovery must derive (model, component) without
+    # crashing on the missing separator, which would abort discovery entirely.
+    _touch(tmp_path / "tflite" / "standalone.tflite")
+    reg = discover(tmp_path)
+    assert {r.key for r in reg.benchmarkable} == {"standalone"}
+    rec = reg.get("standalone")
+    assert rec.model == "standalone" and rec.component == "standalone"
+    assert set(rec.sources) == {"tflite"}
+
+
 def test_bad_zip_is_skipped_not_fatal(tmp_path):
     # A corrupt archive must be skipped, never crash discovery.
     onnx_dir = tmp_path / "onnx"

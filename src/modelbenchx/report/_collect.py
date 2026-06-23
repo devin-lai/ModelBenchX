@@ -17,7 +17,9 @@ def collect_results(runs_dir: str | Path) -> list[RunResult]:
     for path in sorted(runs_dir.glob("*/*.json")):
         try:
             out.append(RunResult.load(path))
-        except (OSError, ValueError, KeyError):
+        except (OSError, ValueError, KeyError, TypeError):
+            # A corrupt, truncated, or shape-mismatched result file is skipped, not
+            # fatal: one bad cache file must never abort report generation.
             continue
     return out
 

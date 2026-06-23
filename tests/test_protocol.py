@@ -55,6 +55,31 @@ def test_interpret_exit0_with_error_file_is_handled_error(tmp_path):
     assert out.error == "ValueError: x"
 
 
+def test_interpret_truncated_result_is_crash_not_raise(tmp_path):
+    # A worker killed by a signal mid-write can leave a truncated result.json.
+    # interpret() must contain it as one crashed run, never raise (which would
+    # abort the whole sweep and defeat subprocess isolation).
+    (tmp_path / P.RESULT).write_text('{"raw_ms": [1.0')  # truncated JSON
+    out = P.interpret(0, "killed", tmp_path)
+    assert out.crashed and not out.ok
+
+
+def test_interpret_truncated_error_is_crash_not_raise(tmp_path):
+    (tmp_path / P.ERROR).write_text('{"type": "Val')  # truncated JSON
+    out = P.interpret(1, "boom", tmp_path)
+    assert out.crashed and not out.ok
+
+
+def test_interpret_corrupt_result_falls_through_to_valid_error(tmp_path):
+    # exit 0 with a truncated result.json but a valid error.json: the corrupt
+    # result is skipped and the handled error wins (not a native crash).
+    (tmp_path / P.RESULT).write_text('{"raw_ms": [1.0')  # truncated
+    (tmp_path / P.ERROR).write_text(json.dumps({"type": "ValueError", "message": "bad"}))
+    out = P.interpret(0, "", tmp_path)
+    assert not out.ok and not out.crashed
+    assert out.error == "ValueError: bad"
+
+
 def test_execute_launch_failure_is_contained(tmp_path):
     # A worker that cannot even launch (missing interpreter / taskpolicy) must be
     # recorded as one failed run, not raised out to abort the whole sweep.

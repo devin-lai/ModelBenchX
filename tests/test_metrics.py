@@ -1,6 +1,7 @@
 import math
 
 import numpy as np
+import pytest
 
 from modelbenchx.metrics import accuracy, timing
 from modelbenchx.results import TimingStats
@@ -17,6 +18,11 @@ def test_cv_pct():
     assert timing.cv_pct(_t(mean_ms=10.0, std_ms=2.0)) == 20.0
     assert timing.cv_pct(_t(mean_ms=0.0)) is None  # guard divide-by-zero
     assert timing.cv_pct(None) is None
+    # A multi-sample run with genuinely zero variance is steady (0%), not unknown.
+    assert timing.cv_pct(_t(iters=10, mean_ms=10.0, std_ms=0.0)) == 0.0
+    # A single sample has undefined variance: report None (not a fake 0% steady)
+    # so it cannot pull the aggregate median CV toward zero.
+    assert timing.cv_pct(_t(iters=1, mean_ms=10.0, std_ms=0.0)) is None
 
 
 def test_cold_start_ms():
@@ -43,6 +49,12 @@ def test_timing_single_sample_zero_std():
     assert t.std_ms == 0.0
     assert t.p99_ms == 2.5
     assert t.load_ms == 10.0
+    assert timing.cv_pct(t) is None  # single-sample CV is undefined, not 0%
+
+
+def test_summarize_requires_at_least_one_sample():
+    with pytest.raises(ValueError):
+        timing.summarize([])
 
 
 def test_timing_drop_raw():

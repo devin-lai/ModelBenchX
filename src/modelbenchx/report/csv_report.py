@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import math
 from pathlib import Path
 
 from ..metrics import timing as tmetrics
@@ -47,9 +48,20 @@ def _row(r: RunResult) -> dict:
     return d
 
 
+def _csv_safe(v):
+    """Non-finite floats (±inf hard-failure / bit-exact sentinels, NaN) are
+    written by csv as the bare tokens ``inf``/``-inf``/``nan``, which spreadsheets
+    import as text — silently breaking numeric sort/AVERAGE over exactly the
+    failure rows on the accuracy columns. Emit an empty cell instead; the
+    categorical failure signal is preserved in ``status``/``all_finite_match``."""
+    if isinstance(v, float) and not math.isfinite(v):
+        return ""
+    return v
+
+
 def write(path: str | Path, results: list[RunResult]) -> None:
     with open(path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=_FIELDS, extrasaction="ignore")
         w.writeheader()
         for r in results:
-            w.writerow(_row(r))
+            w.writerow({k: _csv_safe(v) for k, v in _row(r).items()})

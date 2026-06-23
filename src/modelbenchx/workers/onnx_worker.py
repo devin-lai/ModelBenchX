@@ -87,8 +87,9 @@ class OnnxWorker(Worker):
         outputs = {n: np.asarray(a) for n, a in zip(self._out_names, last, strict=True)}
         # Reference extras for accuracy + downstream backends:
         npio.save_named(self._cache / "baseline_outputs.npz", self._out_names, outputs)
-        (self._cache / "baseline_meta.json").write_text(
-            json.dumps({"input_names": list(self._feed), "output_names": self._out_names})
+        npio.write_text_atomic(
+            self._cache / "baseline_meta.json",
+            json.dumps({"input_names": list(self._feed), "output_names": self._out_names}),
         )
         return outputs
 

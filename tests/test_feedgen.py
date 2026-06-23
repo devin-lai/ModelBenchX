@@ -37,6 +37,18 @@ def test_integer_value_range_nonzero_lower_bound():
     assert x.min() >= 5 and x.max() <= 50
 
 
+def test_integer_value_range_clamped_to_dtype_bounds():
+    # A value_range wider than the integer dtype must be clamped, never wrapped by
+    # the astype() cast: int8 holds [-128, 127], so a [0, 200] hint reaching
+    # astype() would emit negatives (200 -> -56), corrupting the feed and the
+    # reference baseline computed from it.
+    x = generate_from_spec([InputSpec("q", (1000,), np.dtype(np.int8), value_range=(0.0, 200.0))], seed=0)["q"]
+    assert x.dtype == np.int8 and x.min() >= 0 and x.max() <= 127
+    # uint8 [0, 300] clamps to [0, 255] (no modular truncation past 255).
+    u = generate_from_spec([InputSpec("u", (1000,), np.dtype(np.uint8), value_range=(0.0, 300.0))], seed=1)["u"]
+    assert u.dtype == np.uint8 and u.min() >= 0 and u.max() <= 255
+
+
 def test_bool_dtype():
     x = generate_from_spec([InputSpec("b", (5,), np.dtype(np.bool_))], seed=0)["b"]
     assert x.dtype == np.bool_

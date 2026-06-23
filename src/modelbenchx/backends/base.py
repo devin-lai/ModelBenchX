@@ -146,6 +146,13 @@ def format_specs() -> dict[str, FormatSpec]:
 def select_backends(names: tuple[str, ...] | None, *, system: str | None = None) -> list[Backend]:
     """Chosen backends, baseline first, dropping those unsupported on this OS."""
     system = system or platform.system()
+    if names is not None:
+        unknown = [n for n in names if n not in _BY_NAME]
+        if unknown:
+            raise ValueError(
+                f"unknown backend(s): {', '.join(unknown)}; "
+                f"choices: {', '.join(sorted(_BY_NAME))}"
+            )
     chosen = list(BACKENDS) if names is None else [get_backend(n) for n in names]
     chosen = [b for b in chosen if b.platforms is None or system in b.platforms]
     chosen.sort(key=lambda b: (not b.is_baseline, b.name))
