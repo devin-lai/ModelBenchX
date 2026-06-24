@@ -58,6 +58,82 @@ def test_markdown_renders_all_sections():
     assert "MPSGraph boom" in md
 
 
+def test_key_findings_survives_zero_latency_fastest_column():
+    """A sub-resolution/degenerate run can yield mean_ms == 0.0. The speed-up
+    ratio must not divide by it (ZeroDivisionError would crash the whole report,
+    losing every section), and the report must still render."""
+    zero = TimingStats(
+        iters=10, mean_ms=0.0, median_ms=0.0, std_ms=0.0, min_ms=0.0, max_ms=0.0,
+        p90_ms=0.0, p95_ms=0.0, p99_ms=0.0, throughput_ips=float("inf"), load_ms=5.0,
+    )
+    base = RunResult(
+        graph_key="m__m", model="m", component="m", backend="onnxruntime", fmt=".onnx",
+        mode_id="cpu", mode_label="CPU", precision="fp32", status=STATUS_OK,
+        model_path="/x.onnx", is_baseline=True, timing=_timing(50.0),  # baseline nonzero
+    )
+    fastest0 = RunResult(
+        graph_key="m__m", model="m", component="m", backend="coreml-mlpackage", fmt=".mlpackage",
+        mode_id="all", mode_label="ANE + GPU + CPU", precision="fp16", status=STATUS_OK,
+        model_path="/x.mlpackage", timing=zero,  # fastest column has 0.0 ms median
+    )
+    out = markdown.render([base, fastest0])  # must not raise ZeroDivisionError
+    assert "## Key findings" in out and "Fastest configuration" in out
+
+
+def test_key_findings_never_renders_nonfinite_speedup_or_throughput():
+    """The report renders from cached JSON that supports non-finite revival, so a
+    corrupt/hand-edited timing can carry mean_ms = 0.0 (throughput inf) or a
+    revived inf. Neither may surface as 'inf inf/s', 'inf× faster', 'nan× faster',
+    or a 'median inf ms' baseline bullet — those read as a broken report."""
+    cand = RunResult(
+        graph_key="m__m", model="m", component="m", backend="coreml-mlpackage", fmt=".mlpackage",
+        mode_id="all", mode_label="ANE + GPU + CPU", precision="fp16", status=STATUS_OK,
+        model_path="/x.mlpackage", timing=_timing(2.5),
+    )
+    # (a) baseline mean 0.0 -> throughput inf: bullet shows ms, never 'inf inf/s'.
+    zero = TimingStats(
+        iters=10, mean_ms=0.0, median_ms=0.0, std_ms=0.0, min_ms=0.0, max_ms=0.0,
+        p90_ms=0.0, p95_ms=0.0, p99_ms=0.0, throughput_ips=float("inf"), load_ms=5.0,
+    )
+    base0 = RunResult(
+        graph_key="m__m", model="m", component="m", backend="onnxruntime", fmt=".onnx",
+        mode_id="cpu", mode_label="CPU", precision="fp32", status=STATUS_OK,
+        model_path="/x.onnx", is_baseline=True, timing=zero,
+    )
+    f0 = markdown.render([base0, cand]).split("## Key findings")[1].split("\n## ")[0]
+    assert "inf inf/s" not in f0 and "inf×" not in f0 and "nan×" not in f0
+
+    # (b) baseline mean revived as inf (corrupt cache): no 'inf× faster', and the
+    # baseline bullet is suppressed (a non-finite latency is not a real number).
+    infb = TimingStats(
+        iters=10, mean_ms=float("inf"), median_ms=float("inf"), std_ms=0.0,
+        min_ms=float("inf"), max_ms=float("inf"), p90_ms=float("inf"), p95_ms=float("inf"),
+        p99_ms=float("inf"), throughput_ips=0.0, load_ms=5.0,
+    )
+    basei = RunResult(
+        graph_key="m__m", model="m", component="m", backend="onnxruntime", fmt=".onnx",
+        mode_id="cpu", mode_label="CPU", precision="fp32", status=STATUS_OK,
+        model_path="/x.onnx", is_baseline=True, timing=infb,
+    )
+    fi = markdown.render([basei, cand]).split("## Key findings")[1].split("\n## ")[0]
+    assert "inf×" not in fi and "nan×" not in fi
+    assert "Baseline" not in fi  # non-finite baseline latency -> no baseline bullet
+
+
+def test_accuracy_matrix_shows_dash_not_ref_when_reference_absent():
+    """A graph the reference backend never ran must show '—' in the reference
+    column, not 'ref'. A 'ref' cell falsely tells the reader the baseline was
+    present and used for that graph's comparison when it was not."""
+    base_a = _ort_base("a__a")        # ORT ran for a__a only
+    cm_a = _coreml("a__a", 60.0)
+    cm_b = _coreml("b__b", 55.0)      # b__b has a candidate run but NO ORT reference
+    out = markdown.render([base_a, cm_a, cm_b])
+    acc = out.split("## Accuracy matrix")[1].split("\n##")[0]
+    brow = next(ln for ln in acc.splitlines() if ln.startswith("| b__b"))
+    assert "ref" not in brow, f"b__b wrongly labels the absent reference 'ref': {brow}"
+    assert "—" in brow  # the absent reference cell renders as em-dash
+
+
 def test_collect_and_roundtrip(tmp_path):
     runs = tmp_path / "runs" / "m__m"
     for r in _results():

@@ -192,6 +192,39 @@ def test_partial_zero_baseline_rel_err_uses_defined_region():
     assert math.isfinite(o.psnr_db)
 
 
+def test_cosine_is_zero_on_hard_failure():
+    """A non-finite mismatch is a hard failure (PSNR −∞). Its cosine must read 0.0,
+    not the misleading 1.0 the finite-overlap/zero-norm convention yields — a 1.0
+    here would inflate the run-level mean_cosine even as PSNR flags the failure."""
+    # No finite overlap at all (candidate inf where baseline finite).
+    o = accuracy.compare_tensor("x", np.array([1.0]), np.array([np.inf]))
+    assert o.nonfinite_match is False
+    assert math.isinf(o.psnr_db) and o.psnr_db < 0
+    assert o.cosine == 0.0
+    # Partial overlap (NaN where baseline finite) is still a hard failure.
+    o2 = accuracy.compare_tensor(
+        "x", np.array([1.0, 2.0, 3.0, 4.0]), np.array([1.0, 2.0, np.nan, 4.0])
+    )
+    assert o2.nonfinite_match is False
+    assert o2.cosine == 0.0
+
+
+def test_no_runtime_warning_on_nonfinite_positions():
+    """Comparing tensors with coincident non-finite positions must not emit a numpy
+    RuntimeWarning ('invalid value encountered in subtract'): those positions are
+    masked, not real errors. A stray warning pollutes worker stderr (captured for
+    crash diagnosis) and would raise under np.errstate(invalid='raise')."""
+    import warnings
+
+    e = np.array([1.0, np.inf, 3.0])
+    g = np.array([2.0, np.inf, 3.0])
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # any RuntimeWarning becomes an error
+        o = accuracy.compare_tensor("x", e, g)
+    assert o.nonfinite_match is True  # the +inf positions coincide
+    assert math.isclose(o.max_abs_err, 1.0)  # |2-1| over the finite overlap
+
+
 def test_integer_dtype_outputs_compare_finite():
     """Integer outputs (e.g. argmax/class ids) promote to float64 and compare
     cleanly: no spurious non-finite count, finite PSNR when they differ."""

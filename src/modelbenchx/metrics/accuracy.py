@@ -70,7 +70,11 @@ def compare_tensor(name: str, expected: np.ndarray, got: np.ndarray) -> OutputAc
         and np.array_equal(ef[~finite], gf[~finite], equal_nan=True)
     )
 
-    abs_err = np.abs(np.where(finite, gf - ef, 0.0))
+    # Subtract only at finite-overlap positions: evaluating ``gf - ef`` everywhere
+    # computes ``inf - inf`` / ``nan - x`` at masked positions, which is discarded
+    # but emits a spurious ``RuntimeWarning`` (noise in worker stderr, and an error
+    # under ``np.errstate(invalid="raise")``). ``where=`` leaves masked cells at 0.
+    abs_err = np.abs(np.subtract(gf, ef, out=np.zeros_like(gf), where=finite))
     n_finite = int(np.count_nonzero(finite))
     max_abs = float(abs_err.max()) if abs_err.size else 0.0
     denom = np.abs(np.where(finite, ef, 0.0))
@@ -114,6 +118,13 @@ def compare_tensor(name: str, expected: np.ndarray, got: np.ndarray) -> OutputAc
         cosine = 0.0
     else:
         cosine = float(np.dot(ev, gv) / (en * gn))
+
+    # A hard failure (non-finite mismatch) is a real divergence: its similarity
+    # must read 0.0, not the misleading 1.0 the finite-overlap cosine can yield
+    # (e.g. an empty overlap hits the zero-norm == 1.0 convention). Otherwise a
+    # divergent output would still lift the run-level mean_cosine while PSNR is −∞.
+    if not nonfinite_match:
+        cosine = 0.0
 
     return OutputAccuracy(
         name=name,

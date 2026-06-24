@@ -18,12 +18,22 @@ def test_linux_branch(monkeypatch):
 # ---- power / thermal state (affects latency trust on laptops) ---------------
 
 def test_parse_cpu_speed_limit():
+    # Intel macOS prints the clamp '=' separated.
     therm = (
         "Note: No thermal pressure noted\n"
         "Currently delivered:\n"
         "  CPU_Speed_Limit \t= 80\n"
     )
     assert environment._parse_cpu_speed_limit(therm) == 80
+    # Apple Silicon prints it whitespace-separated with NO '=' — the primary
+    # target. Keying on '=' alone returned None here, silently dropping the
+    # throttle caveat on every Apple Silicon host.
+    apple = (
+        "Note: No thermal warning level has been recorded\n"
+        "System-wide thermal status: CPU Power notify\n"
+        " CPU_Speed_Limit         65\n"
+    )
+    assert environment._parse_cpu_speed_limit(apple) == 65
     assert environment._parse_cpu_speed_limit("nothing here") is None
 
 

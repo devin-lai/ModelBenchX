@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import platform
+import re
 import subprocess
 from dataclasses import asdict, dataclass, field
 from importlib import metadata
@@ -47,13 +48,20 @@ def _pmset(*args: str) -> str | None:
 
 def _parse_cpu_speed_limit(therm_text: str) -> int | None:
     """The CPU speed clamp (%) from ``pmset -g therm``; < 100 means the SoC is
-    being throttled (thermal or power), which directly depresses latency."""
+    being throttled (thermal or power), which directly depresses latency.
+
+    Two host formats exist and both must be read: Intel macOS prints it
+    ``=``-separated (``CPU_Speed_Limit \t= 80``) while Apple Silicon prints it
+    whitespace-separated with no ``=`` (``CPU_Speed_Limit         65``). Keying on
+    ``=`` alone returned ``None`` on every Apple Silicon host — the primary target
+    — so a throttled run was never flagged. Parse the first integer after the key
+    regardless of separator."""
     for line in therm_text.splitlines():
-        if "CPU_Speed_Limit" in line and "=" in line:
-            try:
-                return int(line.split("=", 1)[1].strip())
-            except ValueError:
-                return None
+        if "CPU_Speed_Limit" not in line:
+            continue
+        after = line.split("CPU_Speed_Limit", 1)[1]  # value follows the key in both formats
+        m = re.search(r"\d+", after)
+        return int(m.group()) if m else None
     return None
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import statistics
 from datetime import UTC, datetime
 
@@ -58,10 +59,13 @@ def _cell_latency(r: RunResult | None) -> str:
 
 
 def _cell_accuracy(r: RunResult | None, col: Column, ref_name: str) -> str:
-    if _is_ref(col, ref_name):
-        return "ref"
+    # Absence is checked before the reference label: a graph the reference never
+    # ran for has no baseline, so its reference cell is "—" (no comparison), not
+    # "ref" (which would falsely assert the baseline was present and used here).
     if r is None:
         return "—"
+    if _is_ref(col, ref_name):
+        return "ref"
     if r.status == STATUS_OK:
         return _fmt_psnr(r.accuracy.min_psnr_db) if r.accuracy is not None else "n/a"
     return "fail" if r.status == STATUS_FAILED else "skip"
@@ -196,19 +200,34 @@ def _latency_breakdown_rows(agg: list[dict]) -> list[list[str]]:
 def _key_findings(agg: list[dict], ref_name: str, ref_label: str) -> str:
     base = next((a for a in agg if _is_ref(a["col"], ref_name)), None)
     base_lat = base["median_latency"] if base else None
+    # A latency must be a finite number to be reported at all: the report renders
+    # from cached JSON that revives non-finite tokens, so a corrupt/hand-edited
+    # mean_ms could carry inf/nan. ``0.0`` stays reportable (a real sub-resolution
+    # reading); inf/nan never reach the rendered text.
+    base_lat_ok = base_lat is not None and math.isfinite(base_lat)
     bullets: list[str] = []
-    if base_lat:
+    if base_lat_ok:
+        thr = base["median_throughput"]
+        thr_txt = f" ({thr:.0f} inf/s)" if thr is not None and math.isfinite(thr) else ""
         bullets.append(
-            f"- **Baseline** — {ref_label}: median **{base_lat:.1f} ms** "
-            f"({base['median_throughput']:.0f} inf/s) per inference."
+            f"- **Baseline** — {ref_label}: median **{base_lat:.1f} ms**{thr_txt} per inference."
         )
     ranked = sorted(
-        (a for a in agg if not _is_ref(a["col"], ref_name) and a["median_latency"] is not None),
+        (a for a in agg if not _is_ref(a["col"], ref_name)
+         and a["median_latency"] is not None and math.isfinite(a["median_latency"])),
         key=lambda a: a["median_latency"],
     )
     if ranked:
         f = ranked[0]
-        sp = f" — **{base_lat / f['median_latency']:.1f}× faster** than the baseline" if base_lat else ""
+        # Speed-up ratio only when the fastest median is nonzero (0.0 ms is a
+        # sub-resolution reading, not an infinite speed-up — and dividing by it
+        # would crash the report) and a finite baseline exists. ``ranked`` is
+        # already finite, so this can never render inf×/nan×/÷0.
+        sp = (
+            f" — **{base_lat / f['median_latency']:.1f}× faster** than the baseline"
+            if base_lat_ok and f["median_latency"]
+            else ""
+        )
         bullets.append(
             f"- **Fastest configuration** (median latency): {f['col'].full} at "
             f"**{f['median_latency']:.2f} ms**{sp}."
