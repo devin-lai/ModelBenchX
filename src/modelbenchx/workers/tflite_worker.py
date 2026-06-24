@@ -84,6 +84,15 @@ class TFLiteWorker(Worker):
           no transpose is needed.
         """
         shared_names = list(shared or {})
+        # Inputs are mapped positionally; fewer shared arrays than model inputs
+        # would silently leave the trailing inputs at their allocate_tensors()
+        # default (zeros) and report meaningless numbers as a successful run.
+        # Fail loud instead — recorded as one failed run, never silently wrong.
+        if len(shared_names) < len(self._in):
+            raise ValueError(
+                f"shared feed has {len(shared_names)} array(s) but the TFLite model "
+                f"needs {len(self._in)} input(s); cannot map positionally"
+            )
         feed: dict[int, np.ndarray] = {}
         for det, name in zip(self._in, shared_names, strict=False):
             arr = np.asarray(shared[name]).astype(det["dtype"])  # type: ignore[index]

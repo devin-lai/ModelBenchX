@@ -93,7 +93,11 @@ def discover(test_model_dir: str | Path) -> Registry:
     benchmarkable: list[GraphRecord] = []
     for key in sorted(all_keys):
         present = {fmt: per_format[fmt][key] for fmt in specs if key in per_format[fmt]}
-        model, component = naming.split_key(key)
+        # A standalone file whose name carries no "<model>__<component>" split
+        # (e.g. a lone foo.tflite benchmarked latency-only) has no distinct
+        # component; treat the whole key as both model and component rather than
+        # rejecting it, which would abort discovery of every format folder.
+        model, component = naming.split_key(key) if naming.SEP in key else (key, key)
         benchmarkable.append(GraphRecord(key=key, model=model, component=component, sources=present))
 
     return Registry(

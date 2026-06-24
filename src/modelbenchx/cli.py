@@ -32,7 +32,7 @@ def _build_config(args) -> BenchmarkConfig:
         results_dir=args.results.resolve(),
     )
     for attr in ("seed", "warmup", "max_iters", "min_iters", "time_budget_s",
-                 "input_samples", "smoke", "force"):
+                 "input_samples", "smoke", "force", "thermal_gate", "worker_qos"):
         if getattr(args, attr, None) is not None:
             setattr(cfg, attr, getattr(args, attr))
     cfg.backends = getattr(args, "backends", None)
@@ -109,7 +109,8 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--models", type=_csv_tuple, default=None, help="comma-separated model/graph filters")
     pr.add_argument("--reference-backend", dest="reference_backend", default=None,
                     help="backend whose outputs accuracy is measured against (default: onnxruntime)")
-    pr.add_argument("--warmup", type=int, default=None)
+    pr.add_argument("--warmup", type=int, default=None,
+                    help="warmup calls to discard before timing (a floor; 0 times the cold first call)")
     pr.add_argument("--min-iters", dest="min_iters", type=int, default=None)
     pr.add_argument("--max-iters", dest="max_iters", type=int, default=None)
     pr.add_argument("--time-budget", dest="time_budget_s", type=float, default=None)
@@ -118,6 +119,10 @@ def build_parser() -> argparse.ArgumentParser:
                          "accuracy always uses sample 0)")
     pr.add_argument("--seed", type=int, default=None)
     pr.add_argument("--force", action="store_true", default=None, help="ignore cached results and re-run")
+    pr.add_argument("--thermal-gate", dest="thermal_gate", action="store_true", default=None,
+                    help="pause before each run until the SoC's CPU speed limit recovers (Darwin)")
+    pr.add_argument("--worker-qos", dest="worker_qos", default=None,
+                    help="taskpolicy QoS class for worker subprocesses, e.g. 'utility' (Darwin; best-effort)")
     pr.set_defaults(func=cmd_run)
 
     prep = sub.add_parser("report", help="regenerate reports from cached results")
@@ -128,7 +133,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except ValueError as exc:
+        # Config-level errors (e.g. an unknown --backends name) are reported as a
+        # clean message + exit 2, consistent with the missing-dir handling above,
+        # rather than a bare traceback.
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

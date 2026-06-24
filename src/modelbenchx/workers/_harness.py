@@ -73,7 +73,7 @@ def _resolve_feed(jobdir: Path, meta: dict, worker: Worker) -> list[dict[str, An
             npio.save_samples(meta["shared_inputs_npz"], names, samples)
         else:
             npio.save_named(meta["shared_inputs_npz"], names, samples[0])
-        Path(meta["shared_input_names_json"]).write_text(json.dumps(names))
+        npio.write_text_atomic(meta["shared_input_names_json"], json.dumps(names))
         return samples
     if meta.get("inputs_npz"):
         if n > 1:

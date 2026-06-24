@@ -43,6 +43,14 @@ def generate_from_spec(specs: list[InputSpec], *, seed: int = 0) -> dict[str, np
             if s.value_range is not None:
                 lo = int(s.value_range[0])
                 hi = max(lo, int(s.value_range[1]))
+            # Clamp into the dtype's representable range: a value_range wider than
+            # the dtype (e.g. [0, 200] on int8) would otherwise overflow in the
+            # astype() cast (200 -> -56), silently corrupting both the feed and the
+            # reference baseline computed from it. Clamping is monotonic, so
+            # lo <= hi is preserved.
+            info = np.iinfo(s.dtype)
+            lo = min(max(lo, info.min), info.max)
+            hi = min(max(hi, info.min), info.max)
             feed[s.name] = rng.integers(lo, hi + 1, size=s.shape).astype(s.dtype)
     return feed
 

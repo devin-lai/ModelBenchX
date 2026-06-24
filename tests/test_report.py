@@ -324,6 +324,60 @@ def test_column_spec_has_structured_framework_and_mode():
     assert "ANE + GPU + CPU" in legend and "Core ML (ML Program / .mlpackage)" in legend
 
 
+def test_csv_coerces_nonfinite_to_empty_cell(tmp_path):
+    """A hard-failure row (min_psnr_db = -inf) must not write the bare token
+    '-inf' into the CSV: spreadsheets import that as text and break numeric sort/
+    AVERAGE over exactly the failure rows. The cell is emptied; the categorical
+    failure signal survives in status / all_finite_match."""
+    import csv as _csv
+    import io
+
+    runs = [_ort_base("m__m"), _coreml("m__m", float("-inf"))]
+    csv_report.write(tmp_path / "r.csv", runs)
+    text = (tmp_path / "r.csv").read_text()
+    rows = list(_csv.DictReader(io.StringIO(text)))
+    hard = next(r for r in rows if r["backend"] == "coreml-mlpackage")
+    assert hard["min_psnr_db"] == ""          # -inf coerced to empty, not "-inf"
+    assert hard["max_abs_err"] == "0.01"       # finite values untouched
+    assert "inf" not in text and "nan" not in text
+
+
+def test_accuracy_baseline_labeling_default_is_onnx():
+    summary = markdown.render(_results(), config=_cfg()).split("## Summary")[1].split("## Key findings")[0]
+    assert "ONNX Runtime (CPU, FP32)" in summary
+
+
+def test_accuracy_baseline_labeling_follows_reference_backend():
+    """With a non-default --reference-backend, the report must label accuracy
+    against the configured reference (PSNR is computed against it), not the static
+    onnxruntime baseline, and must not show that reference's own PSNR as a number."""
+    out = markdown.render(_results(), config=_cfg(reference_backend="coreml-mlpackage"))
+    summary = out.split("## Summary")[1].split("## Key findings")[0]
+    assert "Core ML" in summary
+    assert "ONNX Runtime (CPU, FP32)" not in summary  # baseline label followed the reference
+    header = out.split("## Accuracy matrix")[1].split("\n")[0]
+    assert "Core ML" in header and "ONNX Runtime" not in header
+    # By default the coreml column shows its real PSNR (60.0); as the reference it
+    # is marked 'ref' and that number is suppressed.
+    acc_default = markdown.render(_results(), config=_cfg()).split("## Accuracy matrix")[1].split("\n##")[0]
+    acc_as_ref = out.split("## Accuracy matrix")[1].split("\n##")[0]
+    assert "60.0" in acc_default
+    assert "60.0" not in acc_as_ref
+
+
+def test_markdown_escapes_pipe_in_failure_note():
+    """A literal '|' in a failure note (exception text) must be escaped so it
+    cannot inject extra columns and corrupt the rendered 'formal human report'."""
+    base = _ort_base("m__m")
+    fail = RunResult(
+        graph_key="m__m", model="m", component="m", backend="coreai", fmt=".aimodel",
+        mode_id="all", mode_label="Auto (all units)", precision="auto", status=STATUS_FAILED,
+        model_path="/x.aimodel", note="boom | with pipe | here",
+    )
+    fails = markdown.render([base, fail]).split("## Failures & notes")[1]
+    assert "boom \\| with pipe \\| here" in fails
+
+
 def test_most_accurate_fp16_excludes_columns_with_hidden_failures():
     """'Most accurate FP16 mode' must not crown a column that hides a hard
     failure. A clean lower-PSNR column must beat a higher-median column that
@@ -341,3 +395,23 @@ def test_most_accurate_fp16_excludes_columns_with_hidden_failures():
     line = next(ln for ln in findings.splitlines() if "Most accurate FP16" in ln)
     assert "Neural Network" in line  # the clean .mlmodel column (38.5 dB) wins
     assert "ML Program" not in line  # not the .mlpackage column that hides a −∞
+
+
+def test_collect_results_skips_structurally_invalid_file(tmp_path):
+    """A result file whose JSON parses but whose shape no longer matches the
+    dataclasses (here a per-output object missing required fields -> TypeError)
+    must be skipped by collect_results, never abort the whole report."""
+    import json
+
+    results = _results()
+    good = next(r for r in results if r.backend == "onnxruntime")
+    bad = next(r for r in results if r.accuracy is not None)
+    runs = tmp_path / "runs" / "m__m"
+    runs.mkdir(parents=True)
+    good.save(runs / "onnxruntime__cpu.json")
+    bad.save(runs / "coreml-mlpackage__all.json")
+    d = json.loads((runs / "coreml-mlpackage__all.json").read_text())
+    d["accuracy"]["per_output"][0] = {"name": "y"}  # truncated -> missing required fields
+    (runs / "coreml-mlpackage__all.json").write_text(json.dumps(d))
+    out = _collect.collect_results(tmp_path / "runs")
+    assert [r.backend for r in out] == ["onnxruntime"]  # bad file skipped, good one kept

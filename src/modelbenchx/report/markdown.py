@@ -15,6 +15,31 @@ def _med(values: list[float]) -> float | None:
     return statistics.median(values) if values else None
 
 
+def _esc(s: str) -> str:
+    """Escape Markdown table metacharacters in free-form / filename-derived cell
+    text (graph keys, failure notes) so a literal ``|`` cannot inject columns and
+    corrupt the rendered table."""
+    return str(s).replace("\\", "\\\\").replace("|", "\\|")
+
+
+def _is_ref(col: Column, ref_name: str) -> bool:
+    """The accuracy reference is the configured ``reference_backend``, not the
+    static ``is_baseline`` flag — they differ whenever ``--reference-backend`` is
+    set to anything other than the default, and the labels must follow the
+    backend the PSNR was actually computed against."""
+    return col.backend == ref_name
+
+
+def _ref_label(cols: list[Column], ref_name: str) -> str:
+    col = next((c for c in cols if c.backend == ref_name), None)
+    return f"{col.framework} ({col.mode_label}, {col.precision.upper()})" if col else ref_name
+
+
+def _ref_short(cols: list[Column], ref_name: str) -> str:
+    col = next((c for c in cols if c.backend == ref_name), None)
+    return f"{col.framework} {col.precision.upper()}" if col else ref_name
+
+
 def _fmt_psnr(v: float) -> str:
     cls = classify_psnr(v)
     if cls == PSNR_EXACT:
@@ -32,8 +57,8 @@ def _cell_latency(r: RunResult | None) -> str:
     return "fail" if r.status == STATUS_FAILED else "skip"
 
 
-def _cell_accuracy(r: RunResult | None, col: Column) -> str:
-    if col.is_baseline:
+def _cell_accuracy(r: RunResult | None, col: Column, ref_name: str) -> str:
+    if _is_ref(col, ref_name):
         return "ref"
     if r is None:
         return "—"
@@ -59,7 +84,7 @@ def _summary(results: list[RunResult]) -> dict:
     }
 
 
-def _aggregate(results: list[RunResult], cols: list[Column]) -> list[dict]:
+def _aggregate(results: list[RunResult], cols: list[Column], ref_name: str, min_iters: int = 1) -> list[dict]:
     """Per backend×mode aggregates (median over a backend's ok runs)."""
     by_col: dict[tuple[str, str], list[RunResult]] = {}
     for r in results:
@@ -68,6 +93,12 @@ def _aggregate(results: list[RunResult], cols: list[Column]) -> list[dict]:
     for c in cols:
         rs = by_col.get((c.backend, c.mode_id), [])
         ok = [r for r in rs if r.status == STATUS_OK and r.timing is not None]
+        # Tail percentiles (p90/p99) are only meaningful with enough samples; the
+        # slow-model wall can stop a run at ~3 iterations, where np.percentile is
+        # pure interpolation toward the max and carries no real tail. Aggregate
+        # them over runs that met the iteration floor so the breakdown does not
+        # present an authoritative-looking tail built from 3 points.
+        reliable = [r for r in ok if r.timing.iters >= min_iters]
         means = [r.timing.mean_ms for r in ok]
         mins = [r.timing.min_ms for r in ok]
         thru = [r.timing.throughput_ips for r in ok]
@@ -81,7 +112,7 @@ def _aggregate(results: list[RunResult], cols: list[Column]) -> list[dict]:
         # These are dropped from the central-tendency median, so they must be
         # counted and surfaced, otherwise a clean finite median hides them.
         n_acc_fail = sum(1 for p in psnrs if classify_psnr(p) == PSNR_FAIL)
-        if c.is_baseline:
+        if _is_ref(c, ref_name):
             median_psnr = None
         elif finite:
             median_psnr = statistics.median(finite)
@@ -109,18 +140,18 @@ def _aggregate(results: list[RunResult], cols: list[Column]) -> list[dict]:
             "median_first": _med([r.timing.first_call_ms for r in ok if r.timing.first_call_ms is not None]),
             "median_cold_start": _med([v for r in ok if (v := tmetrics.cold_start_ms(r.timing)) is not None]),
             "median_p50": _med([r.timing.median_ms for r in ok]),
-            "median_p90": _med([r.timing.p90_ms for r in ok]),
-            "median_p99": _med([r.timing.p99_ms for r in ok]),
+            "median_p90": _med([r.timing.p90_ms for r in reliable]),
+            "median_p99": _med([r.timing.p99_ms for r in reliable]),
             "median_cv": _med([v for r in ok if (v := tmetrics.cv_pct(r.timing)) is not None]),
         })
     return agg
 
 
-def _aggregate_rows(agg: list[dict]) -> list[list[str]]:
+def _aggregate_rows(agg: list[dict], ref_name: str) -> list[list[str]]:
     rows = []
     for a in agg:
         c = a["col"]
-        if c.is_baseline:
+        if _is_ref(c, ref_name):
             acc = "ref"
         elif a["median_psnr"] is None:
             acc = "—"
@@ -162,17 +193,17 @@ def _latency_breakdown_rows(agg: list[dict]) -> list[list[str]]:
     return rows
 
 
-def _key_findings(agg: list[dict]) -> str:
-    base = next((a for a in agg if a["col"].is_baseline), None)
+def _key_findings(agg: list[dict], ref_name: str, ref_label: str) -> str:
+    base = next((a for a in agg if _is_ref(a["col"], ref_name)), None)
     base_lat = base["median_latency"] if base else None
     bullets: list[str] = []
     if base_lat:
         bullets.append(
-            f"- **Baseline** — ONNX Runtime (CPU, FP32): median **{base_lat:.1f} ms** "
+            f"- **Baseline** — {ref_label}: median **{base_lat:.1f} ms** "
             f"({base['median_throughput']:.0f} inf/s) per inference."
         )
     ranked = sorted(
-        (a for a in agg if not a["col"].is_baseline and a["median_latency"] is not None),
+        (a for a in agg if not _is_ref(a["col"], ref_name) and a["median_latency"] is not None),
         key=lambda a: a["median_latency"],
     )
     if ranked:
@@ -220,7 +251,11 @@ def render(results, registry=None, env=None, config=None) -> str:
     idx = index(results)
     graph_keys = sorted({r.graph_key for r in results})
     s = _summary(results)
-    agg = _aggregate(results, cols)
+    ref_name = getattr(config, "reference_backend", "onnxruntime") if config is not None else "onnxruntime"
+    ref_label = _ref_label(cols, ref_name)
+    ref_short = _ref_short(cols, ref_name)
+    min_iters = getattr(config, "min_iters", 1) if config is not None else 1
+    agg = _aggregate(results, cols, ref_name, min_iters)
 
     parts: list[str] = []
     parts.append("# ModelBenchX — Inference Framework Benchmark Report\n")
@@ -232,8 +267,8 @@ def render(results, registry=None, env=None, config=None) -> str:
         f"- **{s['graphs']}** graph(s) benchmarked across **{len(cols)}** backend×mode "
         f"configurations — **{s['runs']}** runs total.\n"
         f"- Outcomes: **{s['ok']} ok**, **{s['failed']} failed**, **{s['skipped']} skipped**.\n"
-        f"- Accuracy baseline: **ONNX Runtime (CPU, FP32)** (configurable). Accuracy is the "
-        f"worst-case (minimum) PSNR across a graph's outputs, in dB; higher is better, ∞ = bit-exact. "
+        f"- Accuracy baseline: **{ref_label}** (configurable via `--reference-backend`). Accuracy is "
+        f"the worst-case (minimum) PSNR across a graph's outputs, in dB; higher is better, ∞ = bit-exact. "
         f"Graphs benchmarked without a reference show `n/a` in accuracy columns (latency-only).\n"
     )
     if config is not None:
@@ -250,7 +285,7 @@ def render(results, registry=None, env=None, config=None) -> str:
 
     # Key findings.
     parts.append("\n## Key findings\n")
-    parts.append(_key_findings(agg))
+    parts.append(_key_findings(agg, ref_name, ref_label))
 
     # Environment.
     if env is not None:
@@ -388,7 +423,7 @@ def render(results, registry=None, env=None, config=None) -> str:
         _table(
             ["backend × mode", "ok", "fail", "skip", "median mean-lat (ms)",
              "median min-lat (ms)", "best-case floor (ms)", "median throughput (inf/s)", "median PSNR (dB)"],
-            _aggregate_rows(agg),
+            _aggregate_rows(agg, ref_name),
         )
         + "\n"
     )
@@ -420,9 +455,9 @@ def render(results, registry=None, env=None, config=None) -> str:
     parts.append(_matrix(graph_keys, cols, idx, _cell_latency) + "\n")
 
     # Accuracy matrix.
-    parts.append("\n## Accuracy matrix — worst-case PSNR vs ONNX FP32 (dB)\n")
+    parts.append(f"\n## Accuracy matrix — worst-case PSNR vs {ref_short} (dB)\n")
     parts.append(
-        _matrix(graph_keys, cols, idx, lambda r, c=None: _cell_accuracy(r, c), pass_col=True) + "\n"
+        _matrix(graph_keys, cols, idx, lambda r, c=None: _cell_accuracy(r, c, ref_name), pass_col=True) + "\n"
     )
 
     # Failures & notes.
@@ -433,7 +468,8 @@ def render(results, registry=None, env=None, config=None) -> str:
         parts.append(
             _table(
                 ["graph", "backend", "mode", "status", "note"],
-                [[r.graph_key, r.backend, r.mode_id, r.status, (r.note or "").replace("\n", " ")[:140]] for r in fails],
+                [[_esc(r.graph_key), r.backend, r.mode_id, r.status,
+                  _esc((r.note or "").replace("\n", " ")[:140])] for r in fails],
             )
             + "\n"
         )
@@ -457,7 +493,7 @@ def _matrix(graph_keys, cols, idx, cell_fn, pass_col: bool = False) -> str:
     headers = ["graph"] + [c.short for c in cols]
     rows = []
     for key in graph_keys:
-        row = [key]
+        row = [_esc(key)]
         for c in cols:
             r = idx.get((key, c.backend, c.mode_id))
             row.append(cell_fn(r, c) if pass_col else cell_fn(r))

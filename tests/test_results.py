@@ -53,6 +53,21 @@ def test_runresult_json_roundtrip(tmp_path):
     assert back.accuracy.per_output[0].name == "class_logits"
 
 
+def test_load_ignores_unknown_output_accuracy_field(tmp_path):
+    """A per-output object written by a newer schema (an extra field) must load
+    cleanly — unknown keys are dropped, mirroring RunResult/TimingStats — rather
+    than crashing resume/report with an unexpected-kwarg TypeError."""
+    r = _sample()
+    p = tmp_path / "r.json"
+    r.save(p)
+    d = json.loads(p.read_text())
+    d["accuracy"]["per_output"][0]["future_metric_db"] = 12.5  # added by a later version
+    p.write_text(json.dumps(d))
+    back = RunResult.load(p)
+    assert back.accuracy.per_output[0].name == "class_logits"
+    assert back.accuracy.per_output[0].psnr_db == 55.0
+
+
 def test_string_field_named_like_a_sentinel_is_not_revived(tmp_path):
     """A tensor whose name is literally 'NaN'/'Infinity' (valid per the ONNX
     spec) must survive the JSON round-trip as that string; only numeric fields

@@ -16,6 +16,7 @@ Pure numpy and stdlib; never imports the conflicting runtimes.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import platform
 import tempfile
@@ -110,9 +111,27 @@ class Orchestrator:
             graphs = graphs[: self.cfg.smoke]
         return graphs
 
+    def _warn_unmatched_filters(self, reg: Registry, graphs: list[GraphRecord]) -> None:
+        """A typo in --models/--modes otherwise yields a silent, green, empty run
+        that is easily mistaken for "nothing to benchmark". Surface it explicitly."""
+        if self.cfg.models is not None and not graphs:
+            self.progress(
+                f"warning: --models {list(self.cfg.models)} matched 0 of "
+                f"{len(reg.benchmarkable)} benchmarkable graph(s)"
+            )
+        if self.cfg.modes is not None:
+            known = {m.id for b in self.backends for m in b.modes}
+            unknown = [s for s in self.cfg.modes if s not in known]
+            if unknown:
+                self.progress(
+                    f"warning: --modes {unknown} match no mode of any selected backend "
+                    f"(known modes: {sorted(known)})"
+                )
+
     def run(self) -> list[RunResult]:
         reg = self.discover()
         graphs = self.select_graphs(reg)
+        self._warn_unmatched_filters(reg, graphs)
         planned = self._planned_modes()
         total = sum(self._planned_count(record) for record in graphs)
         self.progress(
@@ -273,6 +292,56 @@ class Orchestrator:
         return rr.model_sig is None or rr.model_sig == current_sig
 
     @staticmethod
+    def _load_result(result_path: Path) -> RunResult | None:
+        """Load a cached run result, or None if it is missing or unreadable.
+
+        The run file is written atomically (``RunResult.save`` = tmp + replace),
+        but a hand-edit, a full disk, or a kill outside that window can still
+        leave a corrupt JSON, or one whose shape no longer matches the dataclasses
+        (a truncated object, or a field added by a newer version -> ``TypeError``).
+        Treat any such file as a cache miss (regenerate) rather than letting the
+        load abort the whole resumable sweep — the same policy ``report/_collect``
+        already applies when reading results for a report."""
+        try:
+            return RunResult.load(result_path)
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+
+    @classmethod
+    def _feed_committed(cls, result_path: Path) -> bool:
+        """Whether the cached feed/baseline for a graph is safe to reuse.
+
+        The atomically-written run result is the commit marker: a feed worker
+        killed mid-write leaves its shared ``inputs.npz``/``baseline_outputs.npz``
+        possibly truncated or mixed-generation, but its run result is then absent
+        or ``STATUS_FAILED``. Reusing the cache only when the result loaded and is
+        ``STATUS_OK`` prevents pairing fresh inputs with a stale baseline (silently
+        wrong accuracy) or loading a half-written npz."""
+        rr = cls._load_result(result_path)
+        return rr is not None and rr.status == STATUS_OK
+
+    @staticmethod
+    def _remove_partial_feed(*paths: Path) -> None:
+        """Defense-in-depth: drop a feed/baseline cache whose worker failed, so a
+        partial/mixed-generation set can never be resurrected by later code."""
+        for p in paths:
+            with contextlib.suppress(OSError):
+                p.unlink()
+
+    def _load_reference_cache(self, meta_path: Path, outputs_npz: Path, result_path: Path):
+        """Load a committed reference feed cache (names + baseline outputs + run
+        result); return None if any file is unreadable so the graph regenerates."""
+        try:
+            in_names, out_names = self._load_names(meta_path)
+            outputs = npio.load_named(outputs_npz, out_names)
+        except (OSError, ValueError, KeyError):
+            return None
+        rr = self._load_result(result_path)
+        if rr is None:
+            return None
+        return in_names, out_names, outputs, rr
+
+    @staticmethod
     def _await_thermal_recovery(read_speed, sleep, *, min_speed, max_wait_s, poll_s) -> float:
         """Block until the CPU speed limit recovers to ``min_speed`` or
         ``max_wait_s`` elapses; return seconds waited. ``read_speed``/``sleep`` are
@@ -356,25 +425,29 @@ class Orchestrator:
             outputs_npz = cache / "baseline_outputs.npz"
             have_cache = (
                 meta_path.exists() and inputs_npz.exists()
-                and outputs_npz.exists() and result_path.exists()
+                and outputs_npz.exists() and self._feed_committed(result_path)
             )
             feed_stale = have_cache and self._fingerprint_stale(self._read_fingerprint(fp_path), current_fp)
             if have_cache and not self.cfg.force and not feed_stale:
-                in_names, out_names = self._load_names(meta_path)
-                outputs = npio.load_named(outputs_npz, out_names)
-                return _FeedState(in_names, out_names, outputs, True,
-                                  RunResult.load(result_path), feed_by)
+                loaded = self._load_reference_cache(meta_path, outputs_npz, result_path)
+                if loaded is not None:
+                    in_names, out_names, outputs, rr = loaded
+                    return _FeedState(in_names, out_names, outputs, True, rr, feed_by)
             return self._run_reference(record, ref, feed_mode, cache, result_path,
                                        fp_path, current_fp, feed_stale)
 
         # No reference: a feed-capable backend generates inputs (latency-only).
         names_json = cache / "input_names.json"
-        have_cache = names_json.exists() and inputs_npz.exists() and result_path.exists()
+        have_cache = names_json.exists() and inputs_npz.exists() and self._feed_committed(result_path)
         feed_stale = have_cache and self._fingerprint_stale(self._read_fingerprint(fp_path), current_fp)
         if have_cache and not self.cfg.force and not feed_stale:
-            in_names = json.loads(names_json.read_text())
-            return _FeedState(in_names, None, None, True,
-                              RunResult.load(result_path), feed_by)
+            rr = self._load_result(result_path)
+            try:
+                in_names = json.loads(names_json.read_text())
+            except (OSError, ValueError):
+                in_names = None
+            if rr is not None and in_names is not None:
+                return _FeedState(in_names, None, None, True, rr, feed_by)
         return self._run_feed_source(record, feed_by, feed_mode, cache, names_json,
                                      result_path, fp_path, current_fp, feed_stale)
 
@@ -409,8 +482,12 @@ class Orchestrator:
             )
         rr.save(result_path)
         if not outcome.ok:
+            self._remove_partial_feed(
+                cache / "inputs.npz", cache / "baseline_outputs.npz",
+                cache / "baseline_meta.json", cache / "input_names.json", fp_path,
+            )
             return _FeedState(None, None, None, False, rr, ref, feed_changed=feed_stale)
-        fp_path.write_text(json.dumps(current_fp, sort_keys=True))
+        npio.write_text_atomic(fp_path, json.dumps(current_fp, sort_keys=True))
         in_names, out_names = self._load_names(cache / "baseline_meta.json")
         outputs = npio.load_named(cache / "baseline_outputs.npz", out_names)
         return _FeedState(in_names, out_names, outputs, True, rr, ref, feed_changed=feed_stale)
@@ -442,8 +519,9 @@ class Orchestrator:
             )
         rr.save(result_path)
         if not outcome.ok:
+            self._remove_partial_feed(cache / "inputs.npz", names_json, fp_path)
             return _FeedState(None, None, None, False, rr, feed_by, feed_changed=feed_stale)
-        fp_path.write_text(json.dumps(current_fp, sort_keys=True))
+        npio.write_text_atomic(fp_path, json.dumps(current_fp, sort_keys=True))
         in_names = json.loads(names_json.read_text())
         return _FeedState(in_names, None, None, True, rr, feed_by, feed_changed=feed_stale)
 
@@ -464,8 +542,14 @@ class Orchestrator:
         # file changed since the cached run (a re-export of the same canonical
         # name). Otherwise we would report stale numbers for a different model.
         if result_path.exists() and not force:
-            rr = RunResult.load(result_path)
-            if self._cached_is_fresh(rr, model_sig):
+            rr = self._load_result(result_path)
+            # A cached SKIPPED result is never reused: a skip records only that no
+            # feed was available at the time (e.g. this graph had no reference
+            # backend yet), a precondition external to this (graph, backend, mode)
+            # that the cache key does not capture. Re-attempt it on every resume so
+            # adding the reference later actually benchmarks the backend instead of
+            # leaving it permanently skipped until --force.
+            if rr is not None and rr.status != STATUS_SKIPPED and self._cached_is_fresh(rr, model_sig):
                 self.progress(f"{prefix} {record.key} {backend.name}/{mode.id}: cached ({rr.status})")
                 return rr
 
